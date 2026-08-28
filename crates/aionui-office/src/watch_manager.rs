@@ -226,6 +226,13 @@ impl OfficecliWatchManager {
     }
 
     async fn maybe_check_update(&self, doc_type: DocType) {
+        // Bundled/offline builds pin officecli to the version shipped in
+        // managed-resources. Skip the GitHub "latest" check that would otherwise
+        // re-download officecli whenever the pinned version drifts from upstream.
+        // Gated by the desktop launcher via AIONUI_OFFICECLI_DISABLE_UPDATE.
+        if officecli_auto_update_disabled() {
+            return;
+        }
         let mut last = self.last_version_check.lock().await;
         let should_check = match *last {
             Some(t) => t.elapsed() >= VERSION_CHECK_INTERVAL,
@@ -438,6 +445,26 @@ fn is_port_in_use_message(message: &str) -> bool {
         || message.contains("os error 98")
         || message.contains("os error 48")
         || message.contains("os error 10048")
+}
+
+/// Whether the desktop launcher disabled officecli auto-update. Bundled/offline
+/// builds ship a pinned officecli in managed-resources and must not re-download
+/// it when the GitHub "latest" release drifts ahead of the bundled version.
+fn officecli_auto_update_disabled() -> bool {
+    parse_officecli_disable_flag(std::env::var("AIONUI_OFFICECLI_DISABLE_UPDATE").ok().as_deref())
+}
+
+/// Pure flag parser for `AIONUI_OFFICECLI_DISABLE_UPDATE`: any non-empty value
+/// other than `0`/`false` disables the update check. Split out so the policy is
+/// unit-testable without mutating process environment.
+fn parse_officecli_disable_flag(value: Option<&str>) -> bool {
+    match value {
+        Some(raw) => {
+            let v = raw.trim();
+            !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+        }
+        None => false,
+    }
 }
 
 fn normalize_officecli_version(raw: &str) -> String {
@@ -957,5 +984,21 @@ mod tests {
     fn resolve_path_nonexistent_returns_original() {
         let result = resolve_path("/nonexistent/path/test.docx").unwrap();
         assert_eq!(result, "/nonexistent/path/test.docx");
+    }
+
+    #[test]
+    fn officecli_disable_flag_parsing() {
+        // Unset or empty → auto-update stays enabled.
+        assert!(!parse_officecli_disable_flag(None));
+        assert!(!parse_officecli_disable_flag(Some("")));
+        assert!(!parse_officecli_disable_flag(Some("   ")));
+        // Explicit "off" values keep auto-update enabled.
+        assert!(!parse_officecli_disable_flag(Some("0")));
+        assert!(!parse_officecli_disable_flag(Some("false")));
+        assert!(!parse_officecli_disable_flag(Some("False")));
+        // Any other non-empty value disables the update check.
+        assert!(parse_officecli_disable_flag(Some("1")));
+        assert!(parse_officecli_disable_flag(Some("true")));
+        assert!(parse_officecli_disable_flag(Some(" 1 ")));
     }
 }
